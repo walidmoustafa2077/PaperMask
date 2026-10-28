@@ -1,0 +1,24 @@
+# Point Regression Model Configuration
+
+# Model
+backbone: 'mobilenet_v3_small'  # or 'mobilenet_v3_large'
+pretrained: true
+with_classification: false
+
+# Data
+img_size: [256, 256]
+split_ratio: 0.8
+seed: 42
+batch_size: 4  # Reduced for 4GB GPU
+num_workers: 2  # Reduced for stability
+
+# Training
+epochs: 100
+lr: 0.001
+weight_decay: 0.0001
+corner_weight: 1.0  # Reduced - scale_factor now handles amplification properly
+cls_weight: 1.0
+scale_factor: 256.0  # Scale errors to pixel space (matches img_size)
+
+# Augmentation (handled in dataset)
+augment: true

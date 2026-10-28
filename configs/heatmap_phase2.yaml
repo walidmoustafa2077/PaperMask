@@ -1,0 +1,39 @@
+# Phase 2 Heatmap Training Configuration - Refined for 170 images
+
+# Model
+backbone: 'mobilenet_v3_small'
+pretrained: true
+with_edge: false
+with_classification: true  # Keep for regularization
+fpn_channels: 64
+num_bifpn_blocks: 2
+
+# Data
+img_size: [256, 256]
+heatmap_size: [64, 64]
+heatmap_sigma: 3.0  # Increased from 2.0 - larger Gaussian peaks are easier to learn
+split_ratio: 0.8
+seed: 42
+batch_size: 8  # Increased from 4 - you have more data now
+num_workers: 2
+
+# Training
+epochs: 120  # More epochs for larger dataset
+lr: 0.0005  # Lower learning rate - start from better initialization
+weight_decay: 0.0001
+
+# Loss - Using Weighted MSE (more stable than hybrid)
+loss_type: 'weighted_mse'  # Options: 'weighted_mse', 'hybrid', 'focal'
+foreground_weight: 100.0  # Balanced weight for peaks
+background_suppression: 0.3  # Gentler penalty
+
+# Postprocessing
+postprocess_method: 'argmax'
+postprocess_threshold: 0.3
+
+# Augmentations - Enhanced for robustness
+augment_brightness_contrast: 0.5
+augment_hue_saturation: 0.3
+augment_gauss_noise: 0.2
+augment_perspective: 0.5
+augment_affine: 0.5

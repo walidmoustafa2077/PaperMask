@@ -1,0 +1,46 @@
+# Phase 3 Heatmap Training Configuration - 1103 images
+# Tuned for large dataset with strong regularization and augmentation
+
+# Model
+backbone: 'mobilenet_v3_small'
+pretrained: true
+with_edge: false
+with_classification: true  # Classification head helps regularization
+fpn_channels: 64
+num_bifpn_blocks: 2
+
+# Data - Optimized for 1103 images
+img_size: [256, 256]
+heatmap_size: [64, 64]
+heatmap_sigma: 2.5  # Sharper peaks for larger dataset (more signal)
+split_ratio: 0.85  # 85% train, 15% val (more validation data for larger set)
+seed: 42
+batch_size: 16  # Increased - you have plenty of data + memory
+num_workers: 4  # More workers for faster loading
+
+# Training - Extended for large dataset
+epochs: 120  # More epochs to fully utilize large dataset
+lr: 0.0003  # Lower learning rate - start conservative with refined labels
+weight_decay: 0.0002  # Increased regularization
+
+# Loss - Balanced for large dataset
+loss_type: 'weighted_mse'  # Simpler loss, more stable with large data
+foreground_weight: 80.0  # Balanced - not too aggressive
+background_suppression: 0.2  # Gentle - let model learn naturally
+
+# Augmentations - Stronger for generalization with large dataset
+augment_brightness_contrast: 0.6
+augment_hue_saturation: 0.4
+augment_gauss_noise: 0.3
+augment_perspective: 0.6
+augment_affine: 0.6
+
+# Optimization
+lr_schedule: 'cosine'  # Cosine annealing for stable convergence
+warmup_epochs: 5  # Warmup for 5 epochs
+gradient_clip: 1.0  # Prevent gradient explosion
+
+# Validation
+early_stopping_patience: 20  # Stop if no improvement for 20 epochs
+save_best_only: true
+log_interval: 10  # Log every 10 batches

@@ -1,0 +1,30 @@
+# Heatmap Regression Model Configuration
+
+# Model
+backbone: 'mobilenet_v3_small'  # or 'mobilenet_v3_large'
+pretrained: true
+with_edge: false
+with_classification: true  # Enabled to stabilize training on small dataset
+fpn_channels: 64
+num_bifpn_blocks: 2
+
+# Data
+img_size: [256, 256]
+heatmap_size: [64, 64]  # stride 4
+heatmap_sigma: 2.0
+split_ratio: 0.8
+seed: 42
+batch_size: 4  # Reduced for 4GB GPU
+num_workers: 2  # Reduced for stability
+
+# Training
+epochs: 100
+lr: 0.001
+weight_decay: 0.0001
+
+# Loss (Weighted MSE - simpler and more stable)
+foreground_weight: 100.0  # High weight forces sharp peaks (was 50)
+
+# Postprocessing
+postprocess_method: 'argmax'  # Use argmax - more robust to weak peaks during training
+postprocess_threshold: 0.3  # Not used for argmax
