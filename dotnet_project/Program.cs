@@ -91,7 +91,7 @@ class Program
         if (!File.Exists(modelPath))
         {
             Console.WriteLine($"ERROR: model not found at {modelPath}");
-            Console.WriteLine("Pass a path as the first argument, or place paper_v2.onnx in exports/.");
+            Console.WriteLine("Pass a path as the first argument, or place paper_corner.onnx in exports/.");
             return 1;
         }
 
@@ -156,8 +156,8 @@ class Program
         string root = RepoRoot ?? AppContext.BaseDirectory;
         foreach (var candidate in new[]
                  {
-                     Path.Combine(root, "..", "exports", "paper_v2.onnx"),
-                     Path.Combine(root, "exports", "paper_v2.onnx"),
+                     Path.Combine(root, "..", "exports", "paper_corner.onnx"),
+                     Path.Combine(root, "exports", "paper_corner.onnx"),
                      Path.Combine(root, "..", "exports", "heatmap_phase3.onnx"),   // legacy, no offsets
                  })
         {
@@ -165,7 +165,7 @@ class Program
             if (File.Exists(full)) return full;
         }
 
-        return Path.GetFullPath(Path.Combine(root, "..", "exports", "paper_v2.onnx"));
+        return Path.GetFullPath(Path.Combine(root, "..", "exports", "paper_corner.onnx"));
     }
 
     // ---------------------------------------------------------------- inference
@@ -208,6 +208,8 @@ class Program
 
         int hm = Meta.HeatmapSize;
         var corners = Decode(heatmaps, offsets, 4, hm, hm, Meta.Stride);
+        if (Environment.GetEnvironmentVariable("PAPERMASK_DEBUG_DECODE") == "1")
+            Console.WriteLine("decode: " + string.Join(", ", corners.Select(c => $"({c.X:0.###},{c.Y:0.###},{c.Score:0.####})")));
 
         // Back to source pixels: 256-space -> square crop -> original image.
         double scale = (double)side / Meta.InputSize;
@@ -293,19 +295,28 @@ class Program
         reason = string.Empty;
         if (c.Length != 4) { reason = $"expected 4 corners, got {c.Length}"; return false; }
 
-        foreach (var p in c)
+        for (int i = 0; i < c.Length; i++)
         {
+            var p = c[i];
             if (double.IsNaN(p.X) || double.IsNaN(p.Y) || double.IsInfinity(p.X) || double.IsInfinity(p.Y))
             {
                 reason = "non-finite corner";
                 return false;
             }
 
-            if (p.X < 0 || p.Y < 0 || p.X > width || p.Y > height)
+            // Sub-pixel decode can land a hair outside the frame; half a pixel is
+            // rounding, anything more means the model is confused.
+            if (p.X < -0.5 || p.Y < -0.5 || p.X > width + 0.5 || p.Y > height + 0.5)
             {
                 reason = $"corner ({p.X:0.0}, {p.Y:0.0}) outside {width}x{height}";
                 return false;
             }
+
+            c[i] = p with
+            {
+                X = Math.Clamp(p.X, 0, width),
+                Y = Math.Clamp(p.Y, 0, height),
+            };
         }
 
         double twiceArea = 0;
