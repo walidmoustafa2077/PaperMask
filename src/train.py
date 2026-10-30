@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import time
@@ -17,6 +18,7 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from src.config import ConfigError, load_config
 from src.data.paper_dataset import PreflightError, build_datasets, preflight
@@ -33,6 +35,14 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 def _worker_init(seed: int):
     def init(worker_id: int) -> None:
+        # Each worker decoding/augmenting images must not spawn its own thread
+        # pool: with 4 workers on a 4-vCPU node that oversubscribes the CPU and
+        # starves the GPU (observed: 0.6 it/s at batch 64 on Kaggle T4).
+        cv2.setNumThreads(0)
+        try:
+            torch.set_num_threads(1)
+        except Exception:
+            pass
         seed_everything(seed + worker_id)
     return init
 
@@ -47,23 +57,31 @@ def _loader(ds, batch_size: int, num_workers: int, seed: int, shuffle: bool) -> 
         drop_last=shuffle,
         worker_init_fn=_worker_init(seed),
         persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
     )
 
 
 def train_one_epoch(model, loader, loss_fn, optimizer, scaler, cfg, device,
-                    epoch: int, writer=None) -> dict[str, float]:
+                    epoch: int, writer=None, max_steps: int = 0) -> dict[str, float]:
     model.train()
     tcfg = cfg["train"]
     img_size = cfg["data"]["img_size"]
     hm_size = cfg["model"]["heatmap_size"]
 
     running = {"total": 0.0, "heatmap": 0.0, "offset": 0.0}
+    metrics = CornerMetrics(img_size)
     n_batches = 0
-    t0 = time.time()
+    t_data = 0.0
+    t_compute = 0.0
+    last = time.time()
+    bar = tqdm(loader, desc=f"train {epoch + 1}", leave=False, dynamic_ncols=True,
+               bar_format="{l_bar}{bar}| [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
 
-    for step, batch in enumerate(loader):
+    for step, batch in enumerate(bar):
+        t_data += time.time() - last
         images = batch["image"].to(device, non_blocking=True)
         corners = batch["corners"].to(device, non_blocking=True)
+        step_t0 = time.time()
 
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast("cuda", enabled=scaler is not None):
@@ -82,18 +100,35 @@ def train_one_epoch(model, loader, loss_fn, optimizer, scaler, cfg, device,
             torch.nn.utils.clip_grad_norm_(model.parameters(), tcfg["grad_clip"])
             optimizer.step()
 
+        t_compute += time.time() - step_t0
+        last = time.time()
+
         n_batches += 1
         for key in running:
             running[key] += float(losses[key].item())
 
+        with torch.no_grad():
+            pred, _ = decode_corners(out["heatmaps"].detach(), out["offsets"].detach(),
+                                     img_size)
+        metrics.update(pred.cpu(), corners.cpu())
+
         if step % tcfg["log_interval"] == 0:
             lr = optimizer.param_groups[0]["lr"]
-            elapsed = time.time() - t0
-            print(f"  epoch {epoch} step {step}/{len(loader)} "
-                  f"loss {total.item():.4f} lr {lr:.2e} {n_batches / elapsed:.2f} it/s",
-                  flush=True)
+            bar.set_postfix(loss=f"{float(total.item()):.4f}", lr=f"{lr:.1e}",
+                            data=f"{t_data / n_batches:.3f}s",
+                            step=f"{t_compute / n_batches:.3f}s")
 
-    return {k: v / max(n_batches, 1) for k, v in running.items()}
+        if max_steps and n_batches >= max_steps:
+            break
+
+    bar.close()
+    bar.clear()
+    stats = {k: v / max(n_batches, 1) for k, v in running.items()}
+    stats.update(metrics.compute())
+    stats["data_s"] = t_data / max(n_batches, 1)
+    stats["step_s"] = t_compute / max(n_batches, 1)
+    stats["batches"] = float(n_batches)
+    return stats
 
 
 @torch.no_grad()
@@ -193,6 +228,12 @@ def main(argv=None) -> int:
     parser.add_argument("--preflight", action="store_true",
                         help="validate the dataset and exit")
     parser.add_argument("--resume", default=None, help="checkpoint to resume from")
+    parser.add_argument("--no-debug", action="store_false", dest="debug",
+                        help="do not write per-epoch prediction overlays")
+    parser.add_argument("--epochs", type=int, default=0,
+                        help="override train.epochs (smoke runs)")
+    parser.add_argument("--max-steps", type=int, default=0,
+                        help="stop each epoch after N batches (speed profiling)")
     args = parser.parse_args(argv)
 
     try:
@@ -212,7 +253,16 @@ def main(argv=None) -> int:
 
     seed_everything(cfg["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device: {device}")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        gpu = torch.cuda.get_device_name(0)
+        vram = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+        print(f"[OK] GPU: {gpu} ({vram:.1f} GB)")
+    else:
+        print("[!] Running on CPU (training will be slow)")
+    print(f"[OK] Device: {device}")
+    print(f"[OK] Config: {args.config}")
+    print(f"[OK] Debug: {args.debug}")
 
     out_dir = Path(cfg["train"]["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -220,6 +270,10 @@ def main(argv=None) -> int:
 
     (train_ds, train_loader, val_loader, model, loss_fn,
      optimizer, scheduler, scaler) = build_everything(cfg, device)
+
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"[OK] Params: {n_params:,} | train batches/epoch: {len(train_loader)} "
+          f"| val batches: {len(val_loader)}")
 
     start_epoch = 0
     best_mae = float("inf")
@@ -237,23 +291,56 @@ def main(argv=None) -> int:
 
     writer = _summary_writer(out_dir)
     tcfg = cfg["train"]
+    epochs = args.epochs if args.epochs > 0 else tcfg["epochs"]
     patience = 0
+    history: list[dict] = []
 
-    for epoch in range(start_epoch, tcfg["epochs"]):
+    for epoch in range(start_epoch, epochs):
         train_ds.set_epoch(epoch)
-        print(f"epoch {epoch + 1}/{tcfg['epochs']}")
+        t_epoch = time.time()
         train_stats = train_one_epoch(model, train_loader, loss_fn, optimizer, scaler,
-                                      cfg, device, epoch, writer)
+                                      cfg, device, epoch, writer, args.max_steps)
         scheduler.step()
 
         val_stats, visuals = validate(model, val_loader, loss_fn, cfg, device)
-        print(f"  train {train_stats} | val loss {val_stats['loss']:.4f} "
-              f"mae {val_stats['mae_px']:.2f}px pck1 {val_stats['pck1']:.3f} "
-              f"iou {val_stats['iou']:.4f}")
+        epoch_s = time.time() - t_epoch
+        it_s = train_stats["batches"] / max(epoch_s, 1e-6)
+
+        print(f"[Train] Epoch {epoch + 1:3d}/{epochs} | "
+              f"Loss: {train_stats['total']:.4f} "
+              f"(hm={train_stats['heatmap']:.4f}, off={train_stats['offset']:.4f}) | "
+              f"MAE: {train_stats['mae_px']:.2f}px | nMAE: {train_stats['nmae']:.4f} | "
+              f"PCK1: {train_stats['pck1']:.3f} PCK5: {train_stats['pck5']:.3f} | "
+              f"IoU: {train_stats['iou']:.4f} | "
+              f"lr: {optimizer.param_groups[0]['lr']:.2e} | {it_s:.2f} it/s | "
+              f"data: {train_stats['data_s'] * 1000:.0f}ms step: "
+              f"{train_stats['step_s'] * 1000:.0f}ms | {epoch_s:.0f}s")
+        improved = val_stats["mae_px"] < best_mae
+        status = "[+]" if improved else "[-]"
+        print(f"{status} Epoch {epoch + 1:3d}/{epochs} | "
+              f"Loss: {val_stats['loss']:.4f} | "
+              f"MAE: {val_stats['mae_px']:.2f}px | nMAE: {val_stats['nmae']:.4f} | "
+              f"PCK1: {val_stats['pck1']:.3f} PCK2: {val_stats['pck2']:.3f} "
+              f"PCK5: {val_stats['pck5']:.3f} | IoU: {val_stats['iou']:.4f} | "
+              f"invalid: {val_stats['invalid_frac']:.3f}", flush=True)
+
+        history.append({
+            "epoch": epoch + 1,
+            "epoch_s": round(epoch_s, 1),
+            "it_s": round(it_s, 3),
+            **{f"train_{k}": v for k, v in train_stats.items()
+               if isinstance(v, (int, float))},
+            **{f"val_{k}": v for k, v in val_stats.items()
+               if isinstance(v, (int, float))},
+            "lr": optimizer.param_groups[0]["lr"],
+        })
+        (out_dir / "history.json").write_text(json.dumps(history, indent=2),
+                                              encoding="utf-8")
 
         if writer is not None:
             for key, value in train_stats.items():
-                writer.add_scalar(f"train/{key}", value, epoch)
+                if isinstance(value, (int, float)):
+                    writer.add_scalar(f"train/{key}", value, epoch)
             for key, value in val_stats.items():
                 if isinstance(value, (int, float)):
                     writer.add_scalar(f"val/{key}", value, epoch)
@@ -272,23 +359,35 @@ def main(argv=None) -> int:
         if epoch % 10 == 0:
             torch.save(ckpt, out_dir / f"epoch_{epoch:03d}.pth")
 
-        if val_stats["mae_px"] < best_mae:
+        if args.debug and visuals:
+            save_visuals(visuals, out_dir / "visualizations", epoch)
+
+        if improved:
             best_mae = val_stats["mae_px"]
             patience = 0
             torch.save(ckpt, out_dir / "best.pth")
-            save_visuals(visuals, out_dir / "visualizations", epoch)
-            print(f"  new best mae {best_mae:.2f}px -> best.pth")
+            print(f"        new best MAE {best_mae:.2f}px -> best.pth")
         else:
             patience += 1
             if tcfg["early_stop_patience"] > 0 and patience >= tcfg["early_stop_patience"]:
                 print(f"early stopping after {patience} epochs without improvement")
                 break
 
-    (out_dir / "metrics.json").write_text(json.dumps({"best_mae_px": best_mae}, indent=2),
-                                          encoding="utf-8")
+    if history:
+        keys = list(history[0].keys())
+        with (out_dir / "history.csv").open("w", newline="", encoding="utf-8") as fh:
+            writer_csv = csv.DictWriter(fh, fieldnames=keys)
+            writer_csv.writeheader()
+            writer_csv.writerows(history)
+
+    (out_dir / "metrics.json").write_text(
+        json.dumps({"best_mae_px": best_mae, "epochs": len(history)}, indent=2),
+        encoding="utf-8")
     if writer is not None:
         writer.close()
-    print(f"done. best val mae {best_mae:.2f}px")
+    print(f"[OK] Training complete. Best val MAE {best_mae:.2f}px "
+          f"-> {out_dir / 'best.pth'}")
+    print(f"[OK] TensorBoard logs: {out_dir / 'logs'}")
     return 0
 
 
