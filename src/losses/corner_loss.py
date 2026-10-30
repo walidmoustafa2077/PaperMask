@@ -54,7 +54,10 @@ class CornerLoss(nn.Module):
         b = logits.shape[0]
         target, off_t, mask = encode_targets(corners_px, img_size, heatmap_size, self.sigma)
 
-        p = torch.sigmoid(logits).clamp(1e-4, 1 - 1e-4)
+        # Focal terms are evaluated in float32: under autocast, sigmoid(logits) saturates to
+        # exactly 1.0 in fp16 (1 - 1e-4 rounds up to 1.0), so -log(1 - p) becomes inf and
+        # inf * 0 (the masked-out peak cell) turns the whole loss into NaN.
+        p = torch.sigmoid(logits.float()).clamp(1e-4, 1 - 1e-4)
         # CenterNet penalty-reduced focal loss. The positive term is applied only to the peak
         # cell (where the offset is regressed); the negative term is Gaussian-weighted so the
         # ring around the peak is pressed towards zero without dominating the gradient.
@@ -63,7 +66,7 @@ class CornerLoss(nn.Module):
         n = b * logits.shape[1]
         heatmap_loss = (pos_loss.sum() + neg_loss.sum()) / n
 
-        offset_loss = F.l1_loss(offsets * mask.repeat_interleave(2, dim=1),
+        offset_loss = F.l1_loss(offsets.float() * mask.repeat_interleave(2, dim=1),
                                 off_t * mask.repeat_interleave(2, dim=1), reduction="sum") / n
 
         total = self.heatmap_weight * heatmap_loss + self.offset_weight * offset_loss

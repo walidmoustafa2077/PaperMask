@@ -17,6 +17,18 @@ def test_offset_target_fractional():
     assert torch.allclose(off[0, 0, 16, 16], torch.tensor(0.5))
 
 
+def test_saturated_logits_do_not_produce_nan():
+    # Reproduces the epoch-0 NaN: under fp16 autocast sigmoid saturates to exactly 1.0, so
+    # -log(1 - p) is inf and inf * 0 (masked peak cell) yields NaN. fp32 evaluation + clamp
+    # keeps the loss finite even for absurd logits.
+    corners = torch.tensor([[[64.0, 64.0], [192.0, 64.0], [192.0, 192.0], [64.0, 192.0]]])
+    logits = torch.full((1, 4, 64, 64), 60.0)
+    offsets = torch.zeros(1, 8, 64, 64)
+    loss = CornerLoss()(logits, offsets, corners, 256, 64)
+    for key, value in loss.items():
+        assert torch.isfinite(value).all(), key
+
+
 def test_loss_near_zero_for_perfect_prediction():
     # Soft (Gaussian) targets give a small non-zero floor under penalty-reduced focal loss:
     # the ring cells are pressed towards zero while holding a fractional target. The floor is

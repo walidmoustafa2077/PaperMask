@@ -71,6 +71,7 @@ def train_one_epoch(model, loader, loss_fn, optimizer, scaler, cfg, device,
     running = {"total": 0.0, "heatmap": 0.0, "offset": 0.0}
     metrics = CornerMetrics(img_size)
     n_batches = 0
+    skipped = 0
     t_data = 0.0
     t_compute = 0.0
     last = time.time()
@@ -88,6 +89,14 @@ def train_one_epoch(model, loader, loss_fn, optimizer, scaler, cfg, device,
             out = model(images)
             losses = loss_fn(out["logits"], out["offsets"], corners, img_size, hm_size)
             total = losses["total"]
+
+        if not torch.isfinite(total):
+            # Never step on a non-finite loss: one NaN batch poisons every weight and the
+            # whole epoch's reported average.
+            skipped += 1
+            optimizer.zero_grad(set_to_none=True)
+            last = time.time()
+            continue
 
         if scaler is not None:
             scaler.scale(total).backward()
@@ -128,6 +137,9 @@ def train_one_epoch(model, loader, loss_fn, optimizer, scaler, cfg, device,
     stats["data_s"] = t_data / max(n_batches, 1)
     stats["step_s"] = t_compute / max(n_batches, 1)
     stats["batches"] = float(n_batches)
+    stats["skipped"] = float(skipped)
+    if skipped:
+        print(f"[!] skipped {skipped} batch(es) with non-finite loss", flush=True)
     return stats
 
 
