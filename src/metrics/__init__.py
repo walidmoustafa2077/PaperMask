@@ -1,3 +1,3 @@
-from .geometry import CornerMetrics
+﻿from .corners import CornerMetrics
 
-__all__ = ['CornerMetrics']
+__all__ = ["CornerMetrics"]

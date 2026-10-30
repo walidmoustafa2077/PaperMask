@@ -1,0 +1,31 @@
+seed: 42
+
+data:
+  root: data/nexadoc-50k        # <root>/papermask/{train,val,test}/...
+  img_size: 256
+  num_workers: 4
+  augment: true
+
+model:
+  backbone: mobilenet_v3_small
+  pretrained: true
+  fpn_channels: 64
+  heatmap_size: 64
+  sigma: 2.0
+
+train:
+  output_dir: outputs/paper_base
+  batch_size: 32
+  epochs: 100
+  lr: 3.0e-4
+  weight_decay: 2.0e-4
+  warmup_epochs: 3
+  grad_clip: 1.0
+  amp: true
+  early_stop_patience: 15
+  save_best_only: true
+  log_interval: 50
+
+loss:
+  heatmap_weight: 1.0
+  offset_weight: 1.0

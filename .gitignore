@@ -12,7 +12,7 @@ __pycache__/
 # Datasets and generated data
 dataset/
 dataset_v2/
-data/
+/data/
 papermask_data/
 nexadoc_50k/
 runs/
