@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -9,8 +9,14 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.17.0" />
-    <PackageReference Include="OpenCvSharp4" Version="4.8.1.0" />
-    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.8.1.0" />
+    <PackageReference Include="OpenCvSharp4" Version="4.9.0.20240103" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.9.0.20240103" />
+  </ItemGroup>
+
+  <!-- model.json sits next to the exported ONNX; copy it when it exists so the
+       console app can read tensor names, stride and threshold at runtime. -->
+  <ItemGroup Condition="Exists('..\exports\model.json')">
+    <None Include="..\exports\model.json" Link="model.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
