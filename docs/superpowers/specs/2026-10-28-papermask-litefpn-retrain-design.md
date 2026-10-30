@@ -253,15 +253,26 @@ export path.
 
 ## 9. Kaggle
 
-`kaggle/`
+Follows the `DocShadow-Lite/notebook/doc-shadow-lite.ipynb` pattern, which is already proven on
+this account: **clone from GitHub, patch a Kaggle copy of the YAML, train, export, package**.
 
-- `train_papermask.ipynb` — installs nothing (torch/torchvision preinstalled), adds the uploaded
-  code dataset to `sys.path`, runs `src/train.py`, exports `paper_v2.onnx` + `model.json` to
-  `/kaggle/working`, prints the metric table.
-- `README.md` — the two uploads (code dataset, dataset slug), the exact `data_root`
-  (`/kaggle/input/nexadoc-50k`), and how to download the trained artifacts.
-- Code reaches Kaggle as a zip of the repo minus ignored paths; the notebook unzips to
-  `/kaggle/working/papermask` and `chdir`s there.
+- `kaggle/papermask.ipynb` — 14 cells:
+  1. silence TF/warnings, uninstall TensorFlow, `pip install 'protobuf<4' albumentations onnx onnxruntime`,
+     then `git clone --depth 1 --branch main https://github.com/walidmoustafa2077/PaperMask.git /kaggle/working/PaperMask`
+     (idempotent `rmtree` first).
+  2. load `configs/paper_base.yaml`, patch only `data.root → /kaggle/input/nexadoc-50k`,
+     `train.output_dir → /kaggle/working/runs/papermask`, `batch_size 64`, `epochs 120`,
+     `lr 6e-4`, `amp true`; write `configs/kaggle_paper.yaml`. Architecture keys are untouched.
+  3. preflight: `src/train.py --preflight` validates labels/images before any GPU time.
+  4. train, export (`best.pth` → `paper_v2.onnx` + `model.json`), evaluate on `test`.
+  5. package: zip `artifacts/`, visualisations, and `best.pth` only; `FileLink` for each.
+- No pre-resize cache step (unlike DocShadow): inputs are already 256×256, so decode is ~4 % of a
+  step and a cache would add 600 MB of writes and a staleness bug.
+- Resume: re-run cells 1–2, then `--resume /kaggle/working/runs/papermask/last.pth`.
+- `kaggle/README.md` — inputs, accelerator (T4×2, internet on), expected runtimes, what to download.
+
+Repo requirement: **the GitHub repo must be public**, because the notebook clones it without a
+token. If it ever goes private, the clone URL needs a PAT and `isInternetEnabled` stays on.
 
 ## 10. Tests
 
@@ -324,6 +335,7 @@ in git.
 ## 13. Open items (to close before implementation)
 
 1. Approve the architecture and deletion list above.
-2. Confirm the Kaggle code-upload route (zip dataset) or provide a git remote instead.
+2. ~~Confirm the Kaggle code-upload route~~ — resolved: `gh` is authenticated as
+   `walidmoustafa2077`, so the notebook clones the repo exactly like DocShadow-Lite does.
 3. After the first preflight run on Kaggle, confirm the label shape and report the actual
    `data_root` path printed by the resolver.
