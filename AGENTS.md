@@ -1,114 +1,112 @@
 # PaperMask — Agent Handoff
 
-Read this first. It is the compressed state of the repo so a new session does not have to re-explore.
-Full findings: `AUDIT.md` (same directory).
+Read this first. It is the compressed state of the repo.
+
+History: `AUDIT.md` (the original audit of the pre-2026 codebase) and
+`docs/superpowers/specs/2026-10-28-papermask-litefpn-retrain-design.md` +
+`docs/superpowers/plans/2026-10-30-papermask-litefpn-implementation.md`.
+The audit describes a codebase that no longer exists; treat it as background,
+not as current truth.
 
 ## What this is
 
-Document corner detection: predict 4 corner points of a photographed page, then perspective-warp it flat.
+Detect the four corners of a photographed page, then perspective-warp it flat.
 
-Two PyTorch models (MobileNetV3-Small backbone), both 256×256 input, 4 corners:
+One model: MobileNetV3-Small backbone → Lite-FPN neck (64 ch, 4 levels at
+strides 4/8/16/32) → two heads:
 
-| Model | Neck | Output | Status |
-|---|---|---|---|
-| Point regression — `src/models/point_regression.py` | Sequential cross-attention over 5 scales | `corners` (B,8) sigmoid, normalized | **Untrainable as written** — attention at 1/2 scale OOMs (see below) |
-| Heatmap regression — `src/models/heatmap_regression.py` | BiFPN, 4 scales (64/32/16/8) | `heatmaps` (B,4,64,64) sigmoid | Working; this is the one that shipped |
+| Head | Shape | Notes |
+|---|---|---|
+| heatmap | (B,4,64,64) | sigmoid, bias init −4.6, Gaussian σ=2 cells |
+| offsets | (B,8,64,64) | one (dx,dy) per corner, zero-init, in cells |
 
-Deployment: `exports/heatmap_phase3.onnx` → `dotnet_project/Program.cs` (.NET 9 + OnnxRuntime 1.17 + OpenCvSharp 4.8) → argmax decode → warp → `outputs/dotnet_cropped/`.
+~0.33 M params. Decode is `(argmax + offset) * 4` → sub-pixel corners in input
+pixels. Corner order is TL, TR, BR, BL in normalized coordinates everywhere
+except the model input/output, which is pixels.
+
+Deployment: `src/export.py` → `paper_corner.onnx` + `model.json` →
+`dotnet_project/Program.cs` (.NET 9, OnnxRuntime 1.17, OpenCvSharp 4.9).
 
 ## Map
 
 ```
-src/
-  train_point.py      point trainer            (CLI: --config --labels_path --images_dir --output_dir)
-  train_heatmap.py    heatmap trainer          (same CLI; optional loss_type weighted_mse|focal|hybrid)
-  export.py           checkpoint → TorchScript + ONNX (opset 14)
-  data/dataset.py     CornerDataset, albumentations, Gaussian targets, 80/20 split
-  losses/             smooth_l1.py, awing.py (unused), heatmap_focal.py
-  metrics/geometry.py CornerMetrics: MAE/RMSE/PCK/IoU — computed in 256-space, ignores orig_size
-  utils/postprocess.py heatmap_to_points (argmax|gaussian|centroid), scale/denormalize, convexity
-  models/             point_regression.py, heatmap_regression.py
-configs/              point_base.yaml, heatmap_base.yaml, heatmap_phase2.yaml, heatmap_phase3.yaml
-image_labling.py            OpenCV click-labeler (4 corners, `+`/`-` zoom, no undo) — hardcoded dead paths
-image_labling_validation.py renders every label onto its image — hardcoded dead paths
-refine_corners.py           predict → drag corners → write JSON (also --auto, --export-onnx opset 11)
-analyze_heatmap_model.py    post-hoc "learning vs memorization" report (imports scipy, hardcodes paths)
-labels.json         169 labels  ↔ dataset_v2/   (0169.jpg …)
-phase3_labels.json 1103 labels  ↔ dataset/      (curved_*, phone_* — the current set)
-outputs/            heatmap_phase3/, heatmap_phase2_v2/, heatmap_regression*/ , point_regression/
-exports/            heatmap_phase3.onnx (the deployable), exports.zip, Program.cs (duplicate of dotnet_project/Program.cs)
-dotnet_project/     Program.cs + csproj + bin/ (742 MB, ignore)
-torch_env/          4.9 GB broken venv — do not use
+src/config.py              strict YAML schema — unknown keys raise ConfigError
+src/train.py               --config --preflight --resume
+src/evaluate.py            --config --checkpoint --split
+src/export.py              --checkpoint --output-dir, parity-gated (1e-4)
+src/data/paper_dataset.py  resolve_data_root, preflight, order_corners, augmentation
+src/models/litefpn.py      DepthwiseSeparableConv, LiteFPN
+src/models/paper_corner.py build_model (runtime channel discovery)
+src/losses/corner_loss.py  encode_targets, CornerLoss (focal + L1)
+src/metrics/corners.py     MAE/RMSE/PCK@1,2,5%/IoU via shapely
+src/utils/corners.py       decode_corners, quad_props, winding
+refine_corners.py          --checkpoint --images-dir --output [--auto]
+image_labling*.py          legacy pixel-space labelers (do not extend)
+dotnet_project/            PaperMask.Console.csproj — build with the .csproj path
+kaggle/papermask.ipynb     cloud training (clones this public repo)
+configs/paper_base.yaml    the only config
+tests/                     pytest (29 fast + 1 slow)
 ```
 
-## Environment reality (do not assume)
+## Environment reality
 
-- **`torch_env\Scripts\python.exe` is dead**: `pyvenv.cfg` points at `C:\Users\Walid\...\Python311`, which no longer exists. It is also the old path `D:\Side Projects\...`.
-- No `.git` — the repo is **not version controlled**. No tests, no CI, no LICENSE file (README says MIT).
-- 8.6 GB / 39.8k files. Datasets are 2.7 GB, `torch_env` 4.9 GB, `dotnet_project/bin` 742 MB.
-- Python sources are few (~4k lines); the bulk is artifacts.
+- Use `.venv` (torch 2.4.1+cpu, albumentations 2.0.8, onnxruntime 1.31.1).
+  `torch_env/` is a dead committed venv — never use it, never commit another.
+- `dotnet build dotnet_project` fails with MSB1011 (a .sln sits next to the
+  .csproj). Always `dotnet build dotnet_project/PaperMask.Console.csproj`.
+- `git` warns about LF→CRLF on every commit. Harmless.
+- Dataset: `data/nexadoc-50k` is **not** on this machine. Only
+  `data/smoke/papermask` (12 synthetic 256×256 images) exists, for tests.
+- Training happens on Kaggle (`kaggle/papermask.ipynb`), not locally.
 
-## The five things that will bite you
+## Data contract
 
-1. **Defaults are mismatched.** `labels.json` belongs to `dataset_v2/`, but the trainers default to `--images_dir dataset`. Mismatched pairs do not error — `CornerDataset` falls back to a black image on `imread` failure. Always pass the matching pair:
-   `--labels_path phase3_labels.json --images_dir dataset`.
-2. **Labels are model-generated pseudo-labels**, not human ground truth (all coordinates are non-integer on a 0.16-px grid; `image_labling.py` writes ints). Any MAE/IoU number is agreement with the previous model. A human-labeled held-out set does not exist yet.
-3. **Metrics are in 256×256 space**, not original pixels (3024×4032). Multiply per-axis (11.8× / 15.75×) before comparing to deployment behavior.
-4. **Point model OOMs**: at the final attention step the query is 128×128 = 16,384 tokens and K/V is the same → ~1.07e9 scores (~4.3 GB fp32) per sample with 4 heads. `point_base.yaml` asks for batch 4 on 4 GB. The shipped `point_regression/best.pth` therefore does not correspond to the current code path.
-5. **`mobilenet_v3_large` is broken** in both models (hardcoded channel lists are Small's). Configs and QUICKSTART recommend it.
+```
+<root>/papermask/{train,val,test}/images/NNNNN.jpg
+<root>/papermask/{train,val,test}/labels.json   {"00000.jpg": [[x,y]×4]} normalized
+```
 
-## Other confirmed defects (details + fixes in AUDIT.md)
+Splits are produced by the generator and must **never** be re-shuffled. The
+loader accepts `<root>/papermask` or a root that already contains `train/`,
+`val/`, `test/`.
 
-- Export/refine ignore `fpn_channels` / `num_bifpn_blocks` (factory doesn't accept them); fine only while configs equal defaults 64/2.
-- `refine_corners.py` reads `--config` YAML instead of `checkpoint['config']` → silent architecture drift.
-- `with_classification: true` in all heatmap configs, but the head has no target and no loss → dead params; the shipped ONNX has no `cls_logits` (artifact ≠ repo code).
-- `train_point.py` clips gradients **only on CPU**; AMP/CUDA path never clips. `train_heatmap.py` never clips despite `gradient_clip: 1.0` in phase3.
-- Config keys that do nothing: `warmup_epochs`, `lr_schedule`, `gradient_clip`, `early_stopping_patience`, `save_best_only`, `log_interval`, `augment_*`.
-- Augmentation can push corners outside the frame; they are `np.clip`ped to the border instead of dropped → trained-on-wrong-labels.
-- Random split over burst filenames (`curved_0000…`) leaks near-duplicate frames into validation.
-- Per-batch `cpu().numpy()` + `heatmap_to_points` + `metrics.compute()` in the tqdm loop → GPU starvation, O(n²) metric accumulation.
-- `denormalize_corners` mutates its input tensor in place.
-- `torch.load` without `weights_only=True` in export/refine/analyze → pickle RCE risk.
-- C# deploy: argmax-only (no sub-pixel), assumes TL/TR/BR/BL, no convexity/clamping/degenerate check, non-recursive folder scan, basename collisions, `Mat`s not disposed, no stack traces.
-- `QUICKSTART.md` references `test_installation.py`, `debug_visualize.py`, `plan-modelDesign.prompt.md` — none exist; claims 61 images (actual 1103).
-- Annotation tool: saved on 4th click with no undo; pan offsets declared but never updated, so zoom is unusable; absolute `D:\Side Projects\...` paths are dead.
+## Four things that will bite you
 
-## Commands that work today
+1. **Do not re-split.** Fixed 80/10/10 by index is what keeps near-identical
+   renders out of validation.
+2. **`torch.onnx.export` leaves the module in training mode.** `src/export.py`
+   calls `wrapper.eval()` twice and computes parity under `no_grad`. If you
+   refactor export, keep that or BatchNorm will silently break parity.
+3. **Augmentation rejects, it does not clamp.** A quad that leaves the frame
+   causes a retry, then falls back to the clean image. Never reintroduce
+   `np.clip` on keypoints.
+4. **The C# side mirrors the Python preprocessing** (largest centred square
+   crop → INTER_AREA resize → BGR→RGB → ImageNet mean/std). Change one, change
+   the other, and re-run the parity check.
+
+## Verified commands
 
 ```powershell
-# Only if a Python env exists elsewhere; .venv must be recreated first
-python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-pip install scipy            # missing from requirements but imported
-
-python src/train_heatmap.py --config configs/heatmap_phase3.yaml `
-  --labels_path phase3_labels.json --images_dir dataset --output_dir outputs/heatmap_run
-
-python refine_corners.py --checkpoint outputs/heatmap_phase3/best.pth `
-  --config configs/heatmap_phase3.yaml --images-dir dataset --output phase3_refined.json --auto
-
-python src/export.py --checkpoint outputs/heatmap_phase3/best.pth `
-  --model_type heatmap --output_dir exports/heatmap_phase3_export --img_size 256 256
-
-dotnet run --project dotnet_project      # interactive: file or folder path, q to quit
+pytest                      # 29 passed
+pytest -m slow              # ONNX export parity
+python src/train.py --config configs/paper_base.yaml --preflight
+dotnet build dotnet_project/PaperMask.Console.csproj
 ```
 
-Note: `refine_corners.py` builds the model from `--config` (not the checkpoint) and accepts only `backbone` + `with_classification`, so keep `--config` equal to the training config.
+## Numbers from the last smoke run (synthetic, meaningless for quality)
 
-## Data facts (verified)
+Trained 2 epochs on 8 images: val MAE 123.6 px, then dropped the export
+artifact (untrained model, low confidence) — expected.
 
-- `labels.json` 169 ↔ `dataset_v2/` 169 — 0 missing/extra/malformed.
-- `phase3_labels.json` 1103 ↔ `dataset/` 1103 — 0 missing/extra/malformed.
-- All quads: 4 unique points, clockwise (TL,TR,BR,BL), non-self-intersecting.
-- Images: 3024×4032 (dataset), 1536×2048 (dataset_v2); no EXIF surprises observed.
-- Checkpoints: heatmap 12.99 MB, point 59.67 MB; each `outputs/<exp>/` also has `logs/` and `visualizations/epoch_XXX/` composites (GT | heatmaps | prediction | overlay).
+## Open items
 
-## If you continue the work, start here
-
-1. `git init` + `.gitignore` (`torch_env/`, `dataset*/`, `outputs/`, `bin/`, `obj/`, `__pycache__/`, `*.onnx`) + first commit — everything after is un-diffable otherwise.
-2. Make the dataset fail loudly on missing images instead of substituting black.
-3. Fix point-model attention (or drop the point model from the docs) and the large-backbone channel lists; add a one-batch forward test for both models/backbones.
-4. Human-label a small blind test set; recompute MAE/IoU in original pixels against it.
-5. Bring C# decoding to parity with Python (`centroid`/`gaussian`), add quad validation, then a 20-image ONNX↔PyTorch↔C# parity test.
-6. Then: letterbox resize, group split, GPU-side metrics, config plumbing, CLI args for the tooling scripts.
+1. First real Kaggle run has not happened yet. Everything is verified only
+   against synthetic data.
+2. `tests/parity/make_fixture.py` does not exist yet; C# ↔ Python parity was
+   verified by hand on the smoke model (`tests/parity/README.md` describes the
+   intended fixtures).
+3. `confidence_threshold` (0.3 from `model.json`) is enforced in C# only, not
+   in `evaluate.py` — deliberate, so recall loss stays visible.
+4. Legacy `image_labling*.py` still have hardcoded absolute paths and write
+   pixel coordinates. `refine_corners.py` is the supported tool.

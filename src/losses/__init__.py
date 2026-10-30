@@ -1,4 +1,3 @@
-from .awing import AdaptiveWingLoss
-from .smooth_l1 import SmoothL1Loss
+﻿from .corner_loss import CornerLoss, encode_targets
 
-__all__ = ['AdaptiveWingLoss', 'SmoothL1Loss']
+__all__ = ["CornerLoss", "encode_targets"]

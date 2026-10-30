@@ -1,3 +1,6 @@
+﻿# NOTE (legacy): this tool writes PIXEL coordinates in the pre-2026 label
+# format. The current dataset contract is normalized [0, 1] corners, which
+# `refine_corners.py` produces. Kept for reference only.
 import cv2
 import json
 import os
