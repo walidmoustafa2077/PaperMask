@@ -17,12 +17,16 @@ def test_offset_target_fractional():
     assert torch.allclose(off[0, 0, 16, 16], torch.tensor(0.5))
 
 
-def test_loss_zero_for_perfect_prediction():
+def test_loss_near_zero_for_perfect_prediction():
+    # Soft (Gaussian) targets give a small non-zero floor under penalty-reduced focal loss:
+    # the ring cells are pressed towards zero while holding a fractional target. The floor is
+    # ~0.3 here versus ~9.2 for a confidently wrong prediction, i.e. ~30x separation.
     corners = torch.tensor([[[64.0, 64.0], [192.0, 64.0], [192.0, 192.0], [64.0, 192.0]]])
     hm, off, _ = encode_targets(corners, 256, 64, 2.0)
     logits = torch.logit(hm.clamp(1e-6, 1 - 1e-6))
     loss = CornerLoss()(logits, off, corners, 256, 64)
-    assert loss["total"].item() < 1e-3
+    assert loss["total"].item() < 0.5
+    assert loss["offset"].item() < 1e-6
 
 
 def test_loss_large_for_wrong_prediction():

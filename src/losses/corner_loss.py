@@ -55,14 +55,11 @@ class CornerLoss(nn.Module):
         target, off_t, mask = encode_targets(corners_px, img_size, heatmap_size, self.sigma)
 
         p = torch.sigmoid(logits).clamp(1e-4, 1 - 1e-4)
-        # Penalty-reduced focal term on the peak cell (binary), so peaks are learned sharply...
+        # CenterNet penalty-reduced focal loss. The positive term is applied only to the peak
+        # cell (where the offset is regressed); the negative term is Gaussian-weighted so the
+        # ring around the peak is pressed towards zero without dominating the gradient.
         pos_loss = -torch.log(p) * (1 - p).pow(2) * mask
-        # ...and a Gaussian-weighted squared residual elsewhere. The spec's soft-target focal
-        # negative term, -log(1-p) * p^2 * (1-y)^4, is NOT zero at p == y (mid-range Gaussian
-        # cells contribute ~0.2 each, ~15.7 for one sample), so it can never satisfy the
-        # "perfect prediction has ~zero loss" contract. The residual form is zero at p == y and
-        # still pins the cells around a corner to the Gaussian, which keeps argmax sharp.
-        neg_loss = (1.0 - target).pow(4) * (p - target).pow(2)
+        neg_loss = -torch.log(1 - p) * p.pow(2) * (1.0 - target).pow(4) * (1.0 - mask)
         n = b * logits.shape[1]
         heatmap_loss = (pos_loss.sum() + neg_loss.sum()) / n
 
