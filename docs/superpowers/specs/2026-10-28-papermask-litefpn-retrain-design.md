@@ -184,7 +184,7 @@ the host. No `.cpu()` inside the training loop, no `compute()` per batch (fixes 
 `src/train.py`, single entry point.
 
 ```
-python src/train.py --config configs/paper_base.yaml [--resume ckpt.pth]
+python -m src.train --config configs/paper_base.yaml [--resume ckpt.pth]
 ```
 
 Everything is read from the config; unknown keys are a hard error (`ConfigError`), so a knob that
@@ -219,7 +219,7 @@ Loop requirements:
 `src/export.py`
 
 ```
-python src/export.py --checkpoint outputs/paper_run/best.pth --output-dir exports/paper_v2
+python -m src.export --checkpoint outputs/paper_run/best.pth --output-dir exports/paper_v2
 ```
 - Rebuild with `build_model(checkpoint['config'])`, `load_state_dict`, `eval()`.
 - `torch.onnx.export`, opset 17, dynamic batch axis only.

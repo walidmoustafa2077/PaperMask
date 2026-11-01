@@ -8,17 +8,17 @@ python -m venv .venv
 pip install -r requirements.txt -r requirements-dev.txt
 
 # 1. Validate the dataset layout before spending GPU time
-python src/train.py --config configs/paper_base.yaml --preflight
+python -m src.train --config configs/paper_base.yaml --preflight
 
 # 2. Train
-python src/train.py --config configs/paper_base.yaml
+python -m src.train --config configs/paper_base.yaml
 
 # 3. Evaluate on the untouched test split
-python src/evaluate.py --config configs/paper_base.yaml `
+python -m src.evaluate --config configs/paper_base.yaml `
   --checkpoint runs/paper_base/best.pth --split test
 
 # 4. Export ONNX (+ model.json), parity-checked
-python src/export.py --checkpoint runs/paper_base/best.pth --output-dir exports
+python -m src.export --checkpoint runs/paper_base/best.pth --output-dir exports
 
 # 5. Run the .NET app
 dotnet run --project dotnet_project/PaperMask.Console.csproj -- exports\paper_corner.onnx
