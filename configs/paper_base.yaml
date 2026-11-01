@@ -5,6 +5,7 @@ data:
   img_size: 256
   num_workers: 4
   augment: true
+  framing: true
 
 model:
   backbone: mobilenet_v3_small

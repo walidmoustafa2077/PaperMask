@@ -31,6 +31,9 @@ src/
   losses/corner_loss.py CenterNet focal loss + masked L1 on offsets
   metrics/corners.py    MAE/RMSE/PCK/IoU
   utils/corners.py      target decoding and quad geometry
+  utils/preprocess.py   letterbox: scale-to-fit + grey pad (shared geometry)
+  utils/framing.py      reframe: random scale/position augmentation
+  data/make_framing.py  materialise reframed samples as a static dataset
 refine_corners.py       predict -> drag -> write labels (GUI)
 image_labling.py        legacy click labeler (pixel coords, see note)
 dotnet_project/         ONNX inference + warp console app
@@ -65,6 +68,36 @@ between near-identical renders.
 exactly four points, coordinates in range, positive area, and it rejects the
 legacy `[{"value": …, "Count": 2}]` label shape with a clear message.
 
+## Framing
+
+The generated set is uniform: every frame is square and the page covers
+60–70 % of it. Real photos are 1:1 to 1:2.3, with the page anywhere from tiny
+to bleeding off the edge. A model trained only on the uniform framing moves
+its answer by 30–90 px when the framing changes.
+
+Two mechanisms fix that:
+
+- **Letterbox preprocessing** (`src/utils/preprocess.py`) — non-square input is
+  scaled to fit and padded with flat grey instead of being squashed into a
+  square. Squashing stretches the page and moves corners to places the model
+  has never seen. `refine_corners.py` and the dataset both use this; the .NET
+  app still centre-crops and should be switched to match.
+- **Framing augmentation** (`src/utils/framing.py`, `data.framing: true`) — each
+  training sample is rescaled 0.55–1.35×, dropped at a random position and
+  cropped where it overflows, with the corner labels transformed by the same
+  affine. Corners that leave the frame cause a retry, never a clamp.
+
+`src/data/make_framing.py` bakes the same transformation into a static dataset
+if you want something inspectable on disk:
+
+```powershell
+python -m src.data.make_framing --source data/nexadoc-50k/papermask `
+  --dest data/papermask_frames --seed 42
+```
+
+On-the-fly framing gives a fresh draw every epoch, so it is the default; the
+materialiser exists for reproducible datasets and inspection.
+
 ## Train
 
 ```powershell
@@ -72,10 +105,13 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt -r requirements-dev.txt
 
-python src/train.py --config configs/paper_base.yaml --preflight
-python src/train.py --config configs/paper_base.yaml
-python src/train.py --config configs/paper_base.yaml --resume runs/paper_base/last.pth
+python -m src.train --config configs/paper_base.yaml --preflight
+python -m src.train --config configs/paper_base.yaml
+python -m src.train --config configs/paper_base.yaml --resume runs/paper_base/last.pth
 ```
+
+Always use `-m`. `python src/train.py` puts `src/` itself on `sys.path`, so the
+`from src.…` imports fail with `ModuleNotFoundError: No module named 'src'`.
 
 Checkpoints are `{arch_version: 2, config, state_dict, optimizer, scheduler, epoch, metrics}`.
 `last.pth` is written every epoch, `best.pth` whenever validation MAE improves.
@@ -89,8 +125,8 @@ artifacts.
 ## Evaluate and export
 
 ```powershell
-python src/evaluate.py --config configs/paper_base.yaml --checkpoint runs/paper_base/best.pth --split test
-python src/export.py --checkpoint runs/paper_base/best.pth --output-dir exports
+python -m src.evaluate --config configs/paper_base.yaml --checkpoint runs/paper_base/best.pth --split test
+python -m src.export --checkpoint runs/paper_base/best.pth --output-dir exports
 ```
 
 `export.py` refuses to leave a broken artifact behind: it runs the ONNX graph

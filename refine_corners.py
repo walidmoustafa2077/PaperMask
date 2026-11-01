@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.models.paper_corner import build_model
 from src.utils.corners import decode_corners
+from src.utils.preprocess import letterbox, unletterbox_points
 
 ARCH_VERSION = 2
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
@@ -64,18 +65,13 @@ def load_checkpoint(path: str) -> Tuple[torch.nn.Module, dict]:
 
 
 def square_view(img: np.ndarray, img_size: int):
-    """Largest centred square crop, resized to ``img_size``.
+    """Letterbox ``img`` into ``img_size``; returns ``(view, scale, pad_x, pad_y)``.
 
-    Mirrors the .NET preprocessing so what you correct here is what the
-    deployed decoder sees.
+    Letterbox, not centre-crop: cropping threw away up to half of a tall photo
+    and made the model fail on exactly the photos users send. This mirrors the
+    training and .NET preprocessing.
     """
-    h, w = img.shape[:2]
-    side = min(h, w)
-    offset_x = (w - side) // 2
-    offset_y = (h - side) // 2
-    crop = img[offset_y:offset_y + side, offset_x:offset_x + side]
-    resized = cv2.resize(crop, (img_size, img_size), interpolation=cv2.INTER_AREA)
-    return resized, offset_x, offset_y, side
+    return letterbox(img, img_size)
 
 
 def to_tensor(bgr: np.ndarray) -> torch.Tensor:
@@ -92,7 +88,7 @@ def predict_corners(model, img: np.ndarray, config: dict) -> Tuple[np.ndarray, n
     Returns ``(corners (4, 2), scores (4,))``.
     """
     img_size = config["data"]["img_size"]
-    view, offset_x, offset_y, side = square_view(img, img_size)
+    view, scale, pad_x, pad_y = square_view(img, img_size)
 
     with torch.no_grad():
         outputs = model(to_tensor(view))
@@ -102,9 +98,7 @@ def predict_corners(model, img: np.ndarray, config: dict) -> Tuple[np.ndarray, n
 
     corners = corners[0].numpy().astype(np.float32)
     scores = scores[0].numpy().astype(np.float32)
-    corners = corners * (side / img_size)
-    corners[:, 0] += offset_x
-    corners[:, 1] += offset_y
+    corners = unletterbox_points(corners, scale, pad_x, pad_y)
     return corners, scores
 
 

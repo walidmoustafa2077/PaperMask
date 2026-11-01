@@ -10,6 +10,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from src.utils.framing import reframe
+from src.utils.preprocess import letterbox
+
 SPLITS = ("train", "val", "test")
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
@@ -121,13 +124,15 @@ def _train_transform(img_size: int) -> A.Compose:
 
 class PaperCornerDataset(Dataset):
     def __init__(self, root: str, split: str, img_size: int = 256,
-                 augment: bool = False, seed: int = 0, repeat: int = 1):
+                 augment: bool = False, seed: int = 0, repeat: int = 1,
+                 framing: bool = False):
         if split not in SPLITS:
             raise ValueError(f"split must be one of {SPLITS}")
         self.root = resolve_data_root(root)
         self.split = split
         self.img_size = img_size
         self.augment = augment
+        self.framing = framing
         self.repeat = repeat
         self.images_dir = self.root / split / "images"
         self.labels = json.loads((self.root / split / "labels.json").read_text(encoding="utf-8"))
@@ -149,16 +154,21 @@ class PaperCornerDataset(Dataset):
         if bgr is None:
             raise FileNotFoundError(f"unreadable image: {path}")
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        corners_px = np.asarray(self.labels[name], np.float32) * np.array(
+            [rgb.shape[1], rgb.shape[0]], np.float32)
         if rgb.shape[:2] != (self.img_size, self.img_size):
-            rgb = cv2.resize(rgb, (self.img_size, self.img_size), interpolation=cv2.INTER_AREA)
+            # Letterbox, never squash: a non-square source keeps its geometry.
+            rgb, scale, pad_x, pad_y = letterbox(rgb, self.img_size)
+            corners_px = corners_px * scale + np.array([pad_x, pad_y], np.float32)
 
-        corners = np.asarray(self.labels[name], np.float32) * self.img_size
+        corners = corners_px.astype(np.float32)
 
         if self.tf is not None:
-            corners = self._augment(rgb, corners)
-            if corners is None:                     # 5 bad draws: fall back to the clean sample
-                corners = np.asarray(self.labels[name], np.float32) * self.img_size
-            rgb = self._last_image
+            self._rng = np.random.default_rng([self.seed, self.epoch, index])
+            aug = self._augment(rgb, corners)
+            if aug is not None:
+                rgb, corners = aug
+            # else: 5 bad draws -> keep the clean (letterboxed) sample as-is
 
         corners = order_corners(corners)
         if not valid_quad(corners, self.img_size):
@@ -173,13 +183,15 @@ class PaperCornerDataset(Dataset):
         }
 
     def _augment(self, rgb: np.ndarray, corners: np.ndarray):
-        self._last_image = rgb
+        """Return ``(image, corners)`` or ``None`` if every draw was unusable."""
         for _ in range(5):
             out = self.tf(image=rgb, keypoints=corners.tolist())
+            img = out["image"]
             pts = np.asarray(out["keypoints"], np.float32)
+            if self.framing:
+                img, pts = reframe(img, pts, self.img_size, rng=self._rng)
             if pts.shape == (4, 2) and valid_quad(order_corners(pts), self.img_size):
-                self._last_image = out["image"]
-                return pts
+                return img, pts
         return None
 
 
@@ -187,6 +199,7 @@ def build_datasets(cfg: dict) -> tuple[PaperCornerDataset, PaperCornerDataset, P
     data = cfg["data"]
     common = dict(root=data["root"], img_size=data["img_size"])
     train = PaperCornerDataset(split="train", augment=data["augment"],
+                               framing=bool(data.get("framing", False)),
                                seed=cfg["seed"], repeat=1, **common)
     val = PaperCornerDataset(split="val", augment=False, **common)
     test = PaperCornerDataset(split="test", augment=False, **common)

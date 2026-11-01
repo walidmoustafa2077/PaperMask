@@ -18,6 +18,7 @@ SCHEMA: dict[str, Any] = {
         "img_size": int,
         "num_workers": int,
         "augment": bool,
+        "framing": bool,
     },
     "model": {
         "backbone": str,
@@ -46,6 +47,13 @@ SCHEMA: dict[str, Any] = {
 }
 
 
+# Optional keys with a default, so older checkpoints (whose config predates the
+# key) still validate. They are accepted by the schema but not required.
+DEFAULTS: dict[str, dict[str, Any]] = {
+    "data": {"framing": False},
+}
+
+
 def _check(node: dict, schema: dict, prefix: str = "") -> None:
     for key in node:
         if key not in schema:
@@ -71,6 +79,11 @@ def _check(node: dict, schema: dict, prefix: str = "") -> None:
 def validate(cfg: dict) -> dict:
     if not isinstance(cfg, dict):
         raise ConfigError("config root must be a mapping")
+    for section, defaults in DEFAULTS.items():
+        node = cfg.get(section)
+        if isinstance(node, dict):
+            for key, value in defaults.items():
+                node.setdefault(key, value)
     _check(cfg, SCHEMA)
     img_size = cfg["data"]["img_size"]
     hm = cfg["model"]["heatmap_size"]
